@@ -1,0 +1,772 @@
+---
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+header-includes:
+  - \renewcommand{\maketitle}{}
+  - \usepackage{booktabs}
+  - \usepackage{graphicx}
+  - \usepackage{hyperref}
+  - \usepackage{enumitem}
+  - \usepackage[none]{hyphenat}
+  - \setlength{\parindent}{15pt}
+  - \usepackage{amsmath}
+  
+  - \usepackage{float}
+  - \usepackage{placeins}
+  - \floatplacement{figure}{H} 
+  - \usepackage[skip=2pt]{caption}
+  - \floatplacement{table}{H} 
+  
+  - \usepackage{titling}
+  - \pretitle{\begin{center}\Huge\bfseries}
+  - \posttitle{\par\end{center}\vspace{2cm}}
+  - \preauthor{\begin{center}\large}
+  - \postauthor{\end{center}}
+  - \predate{\begin{center}\large}
+  - \postdate{\end{center}}
+---
+
+```{=latex}
+\begin{titlepage}
+  \vspace*{6cm}
+  \centering
+  {\Huge\bfseries Wholesale Customer Analysis\par}
+  \vspace{2cm}
+  {\large Johnny Lee \par}
+  \vspace{1cm}
+  {\large March 31, 2025\par}
+  \vfill
+\end{titlepage}
+
+
+\tableofcontents
+
+\clearpage
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(patchwork)
+library(kableExtra)
+library(caret)
+library(yardstick)
+library(GGally)
+library(glmnet)
+set.seed(7890682)
+options(scipen = 999)
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+data = read.csv("Wholesale_customers_data.csv")
+data = data %>% 
+  rename(
+    'Delicatessen' = Delicassen
+  )
+
+data$Channel = factor(
+    data$Channel,
+    levels = c(1, 2),
+    labels = c("Horeca", "Retail")
+  ) 
+
+data$Region = factor(
+  data$Region,
+  levels = c(1, 2, 3),
+  labels = c("Lisbon", "Oporto", "Other")
+) 
+
+# Split test and train data 30/70 split
+trainRows = sample(nrow(data), 0.7*nrow(data))
+train = data[trainRows, ]
+test = data[-trainRows, ]
+```
+
+\newpage
+
+
+# Introduction
+
+The Wholesale Customer dataset originates from a wholesale distributor in Portugal and captures the annual purchasing behavior of 440 customers. The dataset consists of both categorical and continuous variables that provide valuable insights into customers' purchasing patterns. The categorical variables include \texttt{Channel}, which classifies customers into two groups: \texttt{Horeca} for Hotels, Restaurants, and Cafes, and \texttt{Retail} for Retailers, such as grocery stores. The second categorical variable, \texttt{Region}, categorizes customers based on their location in Portugal, with three possible values: \texttt{Lisbon}, \texttt{Oporto}, and \texttt{Other} for other regions in Portugal that aren't Lisbon and Oporto.
+
+The continuous variables in the dataset represent the annual spending in monetary units across 6 product categories. These include \texttt{Fresh}, which tracks spending on perishable food items like fruits, vegetables, and meats; \texttt{Frozen}, for spending on frozen food items; \texttt{Milk}, which indicates spending on dairy products; \texttt{Grocery}, which reflects spending on non-perishable food items; \texttt{Detergents \& Paper}, for cleaning supplies; and \texttt{Delicatessen}, which accounts for spending on delicatessen products such as cheeses and prepared foods.
+
+This analysis aims to answer two key questions: first, whether it is possible to predict a customer’s grocery spending based on other purchasing patterns, and second, whether a customer’s channel can be determined from their spending behavior. These questions are of particular interest, as understanding the relationships between these variables could lead to more efficient operational strategies.
+
+Answering these questions would offer several advantages for the wholesaler. In terms of grocery spending analysis, the ability to forecast grocery spending accurately would facilitate better warehouse planning by ensuring that the appropriate amount of storage space is allocated. It would also help with financial management, as accurate predictions would allow the wholesaler to set aside the necessary funds for inventory needs. Additionally, delivery scheduling could be optimized to align with expected purchase volumes, reducing delays or overstocking. With better insights into grocery spending, the wholesaler could reduce the risks of stockouts and overstocking, while more reliable spending estimates could also lead to better vendor negotiations.
+
+On the other hand, determining the customer channel based on spending behavior provides its own set of benefits. By automating the process of categorizing customers into channels, the wholesaler can eliminate the need for manual research, saving time and ensuring accurate classification. This understanding would also enable more targeted marketing efforts, where promotions and special deals could be tailored based on the customer’s channel. Furthermore, assigning dedicated service representatives to each channel would improve customer service, fostering better communication and faster issue resolution.
+
+To address these questions, an exploratory analysis of the dataset will be conducted, followed by building the models. The exploratory analysis will involve examining the distributions of the variables, assessing correlations between variables, performing hypothesis tests, and visualizing the results. 
+
+# Exploratory Analysis
+
+This section investigates the dataset’s structure by analyzing summary statistics and variable distributions, examines relationships between features using correlation analysis, and tests the statistical significance of observed patterns through hypothesis testing. These insights directly inform the design of the machine learning models.
+
+\newpage
+
+## Summary Statistics and Distributions
+
+Initially, the summary statistics of the continuous spending variables (Table 1) were examined.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+summary_stats = data %>% 
+  select(-c(Channel, Region)) %>% 
+  summary() %>% 
+  as.data.frame.matrix()
+
+for (i in 1:nrow(summary_stats)) {
+  rownames(summary_stats)[i] = strsplit(summary_stats[i,1], "\\.?\\s*:\\s*")[[1]][1]
+  for (j in 1:ncol(summary_stats)) {
+    summary_stats[i,j] = strsplit(summary_stats[i,j], "\\.?\\s*:\\s*")[[1]][2]
+  }
+}
+
+summary_stats = summary_stats %>% 
+  rownames_to_column("Statistic")
+
+colnames(summary_stats)[colnames(summary_stats) == "Detergents_Paper"] = "Detergents \\& Paper"
+
+kbl(
+  summary_stats,
+  caption = "\\textbf{Summary Statistics of Annual Spending} (Monetary Units)",
+  align = c("l", rep("r", ncol(summary_stats))),
+  digits = 1,
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE
+  ) %>%
+kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+All annual spending categories exhibit right-skewed distributions, as their means are larger than their medians. This skewness suggests the presence of high-spending outliers, indicating that non-parametric methods are needed for the analysis.
+
+Customers spend the most on \texttt{Fresh} food items, which dominates across all summary metrics: highest mean (12,000), median (8,504), third quartile (16,934), and maximum value (112,151). In contrast, \texttt{Delicatessen} has the lowest mean spending (1,524.9) and third quartile (1,820.2), indicating limited investment in items like cheeses and prepared foods. However, \texttt{Detergents \& Paper} shows even lower median spending (816.5) and first quartile (256.8), suggesting retailers prioritize essential food items over non-food essentials like cleaning supplies.
+
+The variability in spending, particularly for \texttt{Fresh} (IQR = 13,806) and \texttt{Grocery} (IQR = 8,503) highlights diverse customer purchasing patterns, with some clients ordering minimal stock (\texttt{Fresh} min. = 3) and others making bulk purchases (\texttt{Fresh} max. = 112,151).
+
+To further validate these findings, the density plots of annual spending for all variables were examined, stratified by region and channel. Below, the right-skewed distributions of \texttt{Fresh}, \texttt{Grocery}, and \texttt{Milk} are highlighted. 
+ 
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height = 3, fig.cap="Density distributions of annual spending for Fresh, Grocery, and Milk.", fig.pos= "H", out.extra = ""}
+data %>% 
+  select(Milk, Fresh, Grocery) %>% 
+  pivot_longer(cols = everything(),
+               values_to = "Annual_Spending",
+               names_to = "Category") %>% 
+  ggplot(aes(x = Annual_Spending)) +
+  geom_density(aes(fill = Category)) + 
+  scale_fill_brewer(palette = "Blues") +
+  facet_grid(~Category) +
+  labs(x = "Annual Spending",
+       title = "Distributions of Largest Spending Categories",
+       y = "Density") +
+  theme(legend.position = "none")
+```
+
+The density plots confirm the right-skewed distributions observed in the summary statistics, with long tails indicating a small subset of customers making exceptionally large purchases. This reinforces the need for non-parametric methods in subsequent analyses.  
+
+## Correlation Analysis
+
+Having examined the distributions of the annual spending variables, the next step was to explore the correlations between them. Given the non-normality of the data, Spearman correlation was used as the statistic (Table 2).
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+corrs = data %>% 
+  select(-c("Channel", "Region")) %>% 
+  cor(method = "spearman") %>% 
+  as.data.frame.matrix() %>% 
+  rownames_to_column("Feature_1") %>% 
+  pivot_longer(col = -Feature_1,
+               names_to = "Feature_2",
+               values_to = "Corr") %>% 
+  filter(abs(Corr) >= 0.3) %>% 
+  filter(Feature_1 < Feature_2) %>% 
+  mutate(
+    Feature_1 = gsub("Detergents_Paper", "Detergents \\\\& Paper", Feature_1),
+    Feature_2 = gsub("Detergents_Paper", "Detergents \\\\& Paper", Feature_2)
+  )
+  
+kbl(
+  corrs,
+  caption = "\\textbf{Moderate to Strong Correlations} (Spearman's $\\rho \\geq |0.3|$)",
+  align = c("l", "r", "r"),
+  digits = 2,
+  format = "latex",
+  booktabs = TRUE,
+  col.names = c("Feature 1", "Feature 2", "Spearman's $\\rho$"),
+  escape = FALSE
+  ) %>%
+kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+The correlation analysis identified six significant relationships ($\rho \geq |0.3|$). The strongest correlations occurred between \texttt{Grocery} and \texttt{Detergents \& Paper} ($\rho = 0.8$), \texttt{Grocery} and \texttt{Milk} ($\rho = 0.77$), and \texttt{Detergents \& Paper} and \texttt{Milk} ($\rho = 0.68$). This suggests customers frequently purchase these categories together, likely as part of routine household grocery shop. 
+
+Moderately correlated pairs included \texttt{Fresh} and \texttt{Frozen} ($\rho = 0.38$), \texttt{Delicatessen} and \texttt{Milk} ($\rho = 0.37$), and \texttt{Delicatessen} and \texttt{Grocery} ($\rho = 0.30$). This indicates a subset of customers purchase Milk, Delicatessen, and Grocery items together, while the link between Fresh and Frozen aligns with traditional purchasing of perishables 
+
+To visualize these relationships, scatter-plots for all pairs with $\rho \geq |0.3|$ were generated, focusing on the strongest associations: \texttt{Grocery} vs. \texttt{Detergents \& Paper} and \texttt{Grocery} vs. \texttt{Milk}.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height = 2.8, fig.cap="Scatter-plots of Annual Spending: Grocery vs. Detergents \\& Paper and Grocery vs. Milk", fig.pos= "H", out.extra = ""}
+p1 = data %>% 
+  select(Channel, Detergents_Paper, Grocery) %>% 
+  ggplot(aes(x = Grocery, y = Detergents_Paper)) + 
+  geom_point(aes(fill = Channel), color = "black", shape = 21) +
+  scale_fill_manual(values = c("Horeca" = "lightblue", "Retail" = "royalblue")) +
+  labs(y = "Detergents & Paper",
+       title = "Grocery vs. Detergents & Paper") +
+  theme(plot.title = element_text(size = 10),
+      axis.title.x = element_text(size = 10),
+      axis.title.y = element_text(size = 10))
+
+p2 = data %>% 
+  select(Channel, Milk, Grocery) %>% 
+  ggplot(aes(x = Milk, y = Grocery)) + 
+  geom_point(aes(fill = Channel), color = "black", shape = 21)  +
+  labs(title = "Milk vs. Grocery") +
+  scale_fill_manual(values = c("Horeca" = "lightblue", "Retail" = "royalblue")) +
+  theme(plot.title = element_text(size = 10),
+        axis.title.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10))
+
+p1 + p2 + plot_layout(guides = "collect")
+```
+
+The scatter-plots reveal a strong linear relationship between \texttt{Grocery} and \texttt{Detergents \& Paper}, along with a moderate linear association between \texttt{Grocery} and \texttt{Milk}. These visualizations reinforce the trends identified in the correlation analysis, confirming that customers often purchase these product categories together.
+
+## Hypothesis Testing
+
+After examining the correlations, hypothesis testing was conducted. Kruskal-Wallis tests were performed on all six annual spending categories and total annual spending (the sum of all categories) to determine whether median spending differed between regions. These tests revealed no statistically significant differences in median spending across regions at a significance level of $\alpha = 0.05$. Additionally, a Chi-squared test indicated no statistically significant dependence between \texttt{Channel} and \texttt{Region} (\textit{p}=value 0.114 for $\alpha = 0.05$).
+
+Next, Mann-Whitney $U$ tests were conducted to compare the median annual spending between the two channels. The results were statistically significant for all six spending categories, as well as for total annual spending ($\alpha = 0.05$), highlighting distinct purchasing patterns between the channels. The \textit{p}-values for the Mann-Whitney $U$ tests are presented in Table 3 below.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+data$Total_Stock = rowSums(data[,3:8])
+manWhit = matrix(
+  nrow = ncol(data) - 2,  
+  ncol = 2                
+) 
+
+colnames(manWhit) = c("Feature", "pval") 
+
+for (i in 3:ncol(data)) {
+  var_name = colnames(data)[i]
+  formula = as.formula(paste(var_name, "~ Channel"))
+  result = wilcox.test(formula, data = data)
+  
+  manWhit[i-2,1] = var_name
+  manWhit[i-2,2] = format.pval(result$p.value, digits = 3, eps = 0.001)
+}
+
+manWhit = as.data.frame.matrix(manWhit) %>% 
+  mutate(
+    Feature = gsub("Detergents_Paper", "Detergents \\\\& Paper", Feature),
+    Feature = gsub("Total_Stock", "Total Stock", Feature)
+  )
+  
+kbl(
+  manWhit,
+  caption = "\\textbf{\\textit{p}-values of Mann-Whitney $U$ Tests for Annual Spending Categories} ($\\alpha = 0.05$).",
+  align = c("l", "r"),
+  format = "latex",
+  booktabs = TRUE,
+  col.names = c("Feature", "\\textit{p}-value"),
+  escape = FALSE
+  ) %>%
+kable_styling(latex_options = c("striped", "hold_position"))
+
+data = data[,1:8]
+```
+
+The table indicates that all \textit{p}-values are less than 0.001, demonstrating that the differences between the channels are highly significant. This provides strong evidence that the channels differ considerably in all spending categories.
+
+To visually illustrate the differences in median spending between the two channels, box-plots were generated. Below are the two most statistically significant results from the Mann-Whitney $U$ tests are highlighted.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height=3, fig.cap="Box-plots of Grocery and Detergents \\& Paper Annual Spending by Channel", fig.pos= "H", out.extra = ""}
+q3_detergent = quantile(data$Detergents_Paper, 0.75)
+
+p1 = data %>% 
+  ggplot(aes(x = Channel, y = Detergents_Paper)) +
+  geom_boxplot(aes(fill = Channel), outlier.shape = NA) + 
+  geom_jitter(height = 0, width = 0.25, alpha = 0.3, shape = 21, color = "black", fill = "navy") + 
+  ylim(0, 1.6*q3_detergent) + 
+  labs(title = "Annual Detergent Spending By Channel",
+       y = "Detergents & Paper") +
+  scale_fill_manual(values = c("Horeca" = "lightblue", "Retail" = "royalblue")) +
+  theme(plot.title = element_text(size = 10),
+      axis.title.x = element_text(size = 10),
+      axis.title.y = element_text(size = 10))
+
+q3_grocery = quantile(data$Grocery, 0.75)
+
+p2 = data %>% 
+  ggplot(aes(x = Channel, y = Grocery)) +
+  geom_boxplot(aes(fill = Channel), outlier.shape = NA) + 
+  geom_jitter(height = 0, width = 0.25, alpha = 0.3, shape = 21, color = "black", fill = "navy") +
+  ylim(0, 1.6*q3_grocery) + 
+  labs(title = "Annual Grocery Spending By Channel") +
+  scale_fill_manual(values = c("Horeca" = "lightblue", "Retail" = "royalblue")) +
+  theme(plot.title = element_text(size = 10),
+      axis.title.x = element_text(size = 10),
+      axis.title.y = element_text(size = 10))
+
+p1 + p2 + plot_layout(guides = "collect")
+```
+
+The box-plots clearly demonstrate a substantial difference in medians between the two channels for \texttt{Grocery} and \texttt{Detergents \& Paper} annual spending. Notably, \texttt{Retail} exhibits considerably higher spending than channel \texttt{Horeca}. These visualizations reinforce the statistical findings from the Mann-Whitney $U$ tests, confirming the distinct purchasing patterns between the channels.
+
+# Methodology
+
+Given the statistically significant differences in median spending across all categories between customer channels (Mann-Whitney $U$ test, \textit{p} < 0.001 for all variables), classification models were developed to distinguish between the two customer types: \texttt{Horeca} and \texttt{Retail}. Additionally, the correlation analysis revealed that \texttt{Milk} and \texttt{Detergents \& Paper} were both strongly correlated with \texttt{Grocery}, making regression a logical approach for predicting annual \texttt{Grocery} spending. To ensure reproducibility, a random seed of 7890682 was set for all models. The modelling approach is outlined below.
+
+## Classification Models
+
+To establish a baseline for comparison, a logistic regression model was built. Logistic regression is a generalized linear model that uses the logit function, transforming the linear combination of predictors into probabilities through an exponential power. This model is valuable for its simplicity and efficiency, and it trains quickly, which is particularly useful when scaling data. Additionally, logistic regression offers high interpretability, as it allows assessment of the contribution of each feature through the magnitude of its coefficients. However, logistic regression comes with some key assumptions, such as the need for a linear relationship between the logit and predictors, no multicollinearity between features, and the absence of outliers. Upon examination of the data, two of these assumptions were found to be violated. There were notable outliers, as revealed by the distributions in Section 2.1, and several features exhibited multicollinearity, as identified in the correlation analysis in Section 2.3. As a result, some observations were perfectly predicted with probabilities of 0 or 1. While these issues could be addressed by removing outliers and highly correlated features, an alternative approach was to explore non-parametric models to avoid these assumptions.
+
+Next, a k-Nearest Neighbors (KNN) model was implemented. KNN is a non-parametric method that makes no assumptions about the underlying distribution of the data. Instead, it classifies an observation by examining the 'k' closest data points in the feature space and assigns the majority class from the nearest neighbors. One of the key advantages of KNN is its simplicity and the lack of model assumptions, making it suitable for the data, given the multicollinearity issues encountered. Since KNN relies on distance calculations, features were scaled using $Z$-score normalization to ensure that larger-scale features do not disproportionately affect the distance metric. This allows all features to contribute equally to the classification process.
+
+Finally, a random forest model was implemented. A random forest creates an ensemble of decision trees, where each tree is trained on a bootstrapped subset of the data and considers a random selection of features at each decision node. This randomization ensures that each tree is slightly different, promoting diversity in the model and improving its generalization capabilities. In classification, the prediction is made by aggregating the results from all trees in the forest, with the final classification being the majority vote. While individual decision trees are highly interpretable due to their clear decision rules, random forests as an ensemble method, are less interpretable. However, this complexity is offset by their superior performance, as they tend to yield more accurate predictions compared to simpler models. A random forest is more complex than logistic regression and KNN, but it is likely to provide the best performance, as it effectively handles non-linear relationships and reduces the impact of overfitting through its ensemble approach.
+
+To validate the models, a 70/30 train/test split was applied. Additionally, 10-fold cross-validation was used, repeated across all models, to enhance generalizability and mitigate the risk of results being influenced by chance. Given that the dataset was approximately 63% \texttt{Horeca} and 37% \texttt{Retail}, up-sampling for \texttt{Retail} was implemented to ensure balanced class representation, training the models with a 50/50 distribution between both channels. In 10-fold cross-validation, the dataset is partitioned into 10 roughly equal subsets. One subset is used for testing, while the other nine are used for training. This process is repeated such that each fold is used as a test set exactly once. The performance metrics are averaged across the 10 iterations to assess the model's generalizability and confirm that the results are not a product of random variation. Model performance was evaluated using accuracy, ROC-AUC, PR-AUC, precision, recall, and F1-score, with ROC-AUC being the most critical to ensure strong overall classification performance across all channels.
+
+Finally, the hyper-parameters for the KNN and random forest models were fine-tuned. For the KNN model, various values for the number of neighbors, $k \in \{3,5, \dots, 17\}$ were tested. For the random forest model, the following parameters were explored: the number of trees $t \in \{100,200, \dots, 500\}$, the number of features to randomly select at each decision node $f \in \{2,3,4,5\}$, and the minimum number of observations required in a node $m \in \{1,5,10\}$. This grid search enabled the identification of the best-preforming parameters for each model.
+
+## Regression Models
+
+Similarly to the classification models, a baseline regression model was first constructed for comparison. This baseline model was simply the mean annual grocery spending from the training data. 
+
+Next, feature engineering was performed to determine which predictors to include in the regression models. Initially, \texttt{Detergents \& Paper} was the only feature, as it was the most strongly correlated with \texttt{Grocery}. Then, \texttt{Milk} was added, as it was the second most correlated feature. After that, different feature combinations were experimented with, which included a model with all seven features and one with only the continuous features. Finally, the relationships of the 5 continuous features with \texttt{Grocery} were revisited by generating a pairs plot of the 6 continuous variables (including \texttt{Grocery}).
+
+The pairs plot suggested that \texttt{Fresh}, \texttt{Frozen}, and \texttt{Delicatessen} might not have a strictly linear relationship with \texttt{Grocery}, so degree 2 and 3 polynomial terms for these features were incorporated. The plot also reaffirmed the presence of multicollinearity among the features, prompting the addition of interaction terms for \texttt{Fresh} and \texttt{Frozen}, \texttt{Detergents \& Paper} and \texttt{Milk}, as well as \texttt{Milk} and \texttt{Delicatessen}.
+
+Next, regularized regression was applied to models with many correlated features. Two regularization methods were employed: ridge and lasso regression. Ridge regression shrinks coefficients by adding the $L_2$ norm of the coefficients to the Ordinary Least Squares loss function, reducing coefficient magnitude without driving them to zero. This approach is ideal for shrinking correlated features without excluding them entirely. In contrast, lasso regression incorporates the $L_1$ norm of the coefficients into the Ordinary Least Squares loss function, which not only shrinks coefficients but can also reduce them to zero, effectively performing feature selection. These regularization techniques were applied to models with more than two features, including those with interaction and polynomial terms, and the model with continuous features only.
+
+As with the classification models, the regression models were validated using a 70/30 train/test split. In addition, 10-fold cross-validation was applied (as explained in Section 3.1) across all models to enhance generalizability and reduce the risk of chance findings. Model performance was evaluated using RMSE.
+
+Finally, the $\lambda$ values in the ridge and lasso regression models were fine-tuned to optimize for RMSE. Additionally, the coefficients were analyzed for how they shrank as $\lambda$ increased, to identify which features were most influential in the models.
+
+# Results
+
+This section discusses the results of the classification and regression models in predicting customer channel and grocery spending. The performance of the classification models was quantified using ROC-AUC, while the regression models were evaluated based on RMSE. To reiterate, all models underwent 10-fold cross-validation to ensure that the findings were not due to chance.
+
+## Classification
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+class_models_code = readRDS("class_models_and_functions.rds")
+models_list = class_models_code$models_list
+validate = class_models_code$validate
+scaleZ = class_models_code$scaleZ
+
+scaledData = scaleZ(train, test)
+testZ = scaledData$scaled_test
+```
+
+Firstly, the logistic regression model will be discussed, with a particular focus on its key performance metric, the ROC-AUC. The model achieved an impressive test ROC-AUC of 0.936 and a cross-validation ROC-AUC of 0.958, both of which are excellent results, especially for a baseline model. The model was trained on z-score scaled data to allow for a fair comparison of the magnitudes of the feature coefficients. Table 4 below highlights the coefficients of the logistic regression model, which reflect the relative importance of each feature in the scaled data.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+log_coef = summary(models_list$Logistic)$coefficients %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  dplyr::rename(
+    "Coef" = "Estimate",
+    "Std" = "Std. Error",
+    "z" = "z value",
+    "p" = "Pr(>|z|)"
+  ) %>%
+  mutate(
+    Feature = gsub("Detergents_Paper", "Detergents \\\\& Paper", Feature),
+    Feature = gsub("RegionOporto", "Region Oporto", Feature),
+    Feature = gsub("RegionOther", "Region Other", Feature) 
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(., 3))) %>% 
+  select(Feature, Coef, Std, p)
+
+kbl(
+  log_coef,
+  caption = "\\textbf{Logistic Regression Coefficients} (Standardized Coefficients)",
+  align = c("l", "r", "r", "r"),
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE,
+  col.names = c("Feature", "Coefficient", "Std. Error", "\\textit{p}-value")
+) %>%
+kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+The results highlight \texttt{Detergents \& Paper} as the most influential predictor in the logistic regression model, with the largest absolute coefficient ($| \beta_{\texttt{Detergents \& Paper}} | = 4.713$) and near-zero \textit{p}-value ($p \approx 0$), indicating exceptional statistical significance. Other statistically significant predictors, ranked from most to least significant, include the intercept ($|\beta_0 | = -2.645, p \approx 0$), \texttt{Frozen} ($|\beta_{\texttt{Frozen}} | = 2.568, p = 0.001$), \texttt{Region Oporto} ($|\beta_{\texttt{Region Oporto}} | = 2.524, p = 0.010$), \texttt{Region Other} ($|\beta_{\texttt{Region Other}} | = 2.317, p = 0.001$), and \texttt{Milk} ($|\beta_{\texttt{Milk}} | = 0.974, p = 0.016$).
+
+Notably, while the earlier Chi-squared test found no direct link between \texttt{Channel} and \texttt{Region} ($p = 0.114$), the logistic regression model reported \texttt{Region} as statistically significant ($p = 0.010$ and $p=0.001$). These results are contradictory.
+
+This mismatch suggests the logistic regression model might reflect random chance in the data rather than a true connection between \texttt{Channel} and \texttt{Region}. However, these effects are likely negligible in comparison to the dominant predictor, \texttt{Detergents \& Paper}, which has the largest coefficient and a near-zero p-value. \texttt{Detergents \& Paper} is likely the most significant feature because Retailers buy more non-food items like cleaning supplies than \texttt{Horeca} customers.
+
+Next, the results of the KNN model will be discussed. Like the logistic regression model, the KNN model was trained on z-score scaled data (as explained in Section 3.1). However, unlike logistic regression, there is no explicit model in KNN. Instead, the majority class among the $k$ nearest neighbors is used to classify new data points. The grid search identified the optimal number of neighbours as $k = 17$, the highest tested value, suggesting that incorporating more neighbours improves generalization by reducing sensitivity to local noise.
+
+The KNN model achieved a test ROC-AUC of 0.944, slightly outperforming logistic regression (0.936), but its cross-validation ROC-AUC (0.948) was marginally lower than logistic regression’s (0.958). Given the minimal difference in performance metrics, the two models are comparable in predictive power. However, the lack of additional metrics makes it challenging to definitively declare one model superior.
+
+Finally, the results of the random forest model are discussed. Unlike KNN and logistic regression, the random forest was trained on the unscaled original data, as tree-based models do not rely on distance metrics or coefficient interpretation, rendering scaling unnecessary. The grid search identified the optimal hyper-parameters as $t=500$ decision trees, $f=2$ randomly selected features per split, and a minimum node size of $m=10$ observations. The large number of trees ensures predictions stabilize through aggregation, while limiting features per split reduces tree correlation, promoting generalization. The minimum node size balances simplicity and predictive power, removing overly complex splits to mitigate overfitting.
+
+The random forest model achieved a test ROC-AUC of 0.955, marginally outperforming KNN (0.945) and logistic regression (0.936), and its cross-validation ROC-AUC of 0.970 surpassed both counterparts (KNN: 0.948, logistic regression: 0.958). 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height=3, fig.cap = "Random Forest Feature Importance (Gini Index)", fig.pos= "H", out.extra = ""}
+# Extract and plot variable importance
+var_imp = varImp(models_list$`Random Forest`)$importance %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  arrange(-Overall) %>%
+  mutate(
+    Feature = gsub("Detergents_Paper", "Detergents \\& Paper", Feature),
+    Feature = gsub("RegionOporto", "Region Oporto", Feature),
+    Feature = gsub("RegionOther", "Region Other", Feature) 
+  )
+
+ggplot(var_imp, aes(x = reorder(Feature, Overall), y = Overall)) +
+  geom_col(fill = "dodgerblue3") +
+  coord_flip() +  # Horizontal bars for readability
+  labs(
+    title = "Random Forest Variable Importance",
+    x = "Feature",
+    y = "Importance (Gini Index)"
+  )
+```
+Figure 4 highlights the importance of each feature according to the Gini Index ($G$), which quantifies a feature’s contribution to node purity across the forest. The top predictors were \texttt{Detergents \& Paper} ($G = 100.0$), \texttt{Grocery} ($G = 72.5$), and \texttt{Milk} ($G = 46.4$), reinforcing their role in distinguishing Retailers from \texttt{Horeca} customers (as found in Section 2.3). Notably, \texttt{Region} had zero importance ($G_{\texttt{Other}}  = 1.56$, $G_{\texttt{Oporto}} \approx 0$), aligning with the earlier Chi-squared test ($p=0.114$), which found no direct dependence between \texttt{Channel} and \texttt{Region}. However, this doesn’t match up with what was seen earlier with the logistic model, where Region did play a role ($p=0.010$ and $p=0.001$). This reinforces that the significant \texttt{Region} coefficient was likely due to random chance.
+
+While these metrics position the random forest as the top performer, the narrow margins suggest all three models are broadly comparable. Without additional metrics, it remains challenging to declare a single superior model.
+
+Now, the models can be compared. Below, Table 5 summarizes the performance of the classification models. It includes accuracy, recall, precision, F1-score, ROC-AUC, and PR-AUC for all three models (logistic regression, KNN, and the random forest), along with their cross-validation performance metrics, denoted by the model name followed by 'CV'.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+validation = validate(test, testZ, models_list) %>% 
+  mutate(Metrics = gsub("_", " ", Metrics)) %>% 
+  dplyr::rename_with(~ gsub("_", " ", .), everything()) %>% 
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+kbl(
+  validation,
+  caption = "\\textbf{Model Performance Comparison}",
+  align = c("l", rep("r", nrow(validation))),
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE,
+) %>%
+kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+The random forest model emerged as the superior classifier across nearly all performance metrics, demonstrating robust predictive power and generalizability. The random forest model outperformed logistic regression (0.924 vs. 0.909) and KNN (0.924 vs. 0.871) in both test accuracy and cross-validation accuracy (0.925 vs. 0.910 for logistic regression and 0.925 vs. 0.899 for KNN), with logistic regression following closely behind. Notably, the random forest model dominated recall, critical for minimizing false negatives, achieving a test score of 0.963 against logistic regression’s 0.939 and KNN’s 0.871, while maintaining strong cross-validation recall at 0.926. KNN won the precision category with test and cross-validation precision values of 0.922 and 0.976, respectively, but the random forest was close behind with 0.919 and 0.968 for test and cross-validation, showing that both models performed very similarly. The random forest also excelled in balancing precision and recall, securing the highest F1 scores of 0.940 on the test set and 0.945 in cross-validation. As the primary metric, ROC-AUC highlighted the random forest’s superiority with test and cross-validation scores of 0.955 and 0.970, respectively, outperforming logistic regression (0.936 and 0.958) and KNN (0.944 and 0.948). While logistic regression showed stability in PR-AUC with test and cross-validation scores of 0.913 and 0.930, the random forest led on the test set with 0.971, whereas KNN suffered severe overfitting with a cross-validation PR-AUC of 0.464. Combined, these results position the random forest as the optimal choice due to its minimal performance gaps between test and cross-validation, dominance in ROC-AUC for class separation, and balanced performance across metrics.
+
+To further evaluate model performance, the PR and ROC curves are examined. These curves visually represent the previously discussed ROC-AUC and PR-AUC metrics. Below are the PR and ROC curves.
+
+\vspace{-15pt} 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=3, fig.pos="H", fig.cap="ROC and PR curves of the Classification Models (Logistic Regression, KNN, Random Forest)", out.extra = ""}
+# Create prediction data frame
+data_pred = tibble()
+
+for (i in 1:length(models_list)) {
+  
+  if (names(models_list)[i] == "Random Forest") {
+    estimate = predict(models_list[[i]], test, type = "prob")[, "Horeca"]
+  } else {
+    estimate = predict(models_list[[i]], testZ, type = "prob")[, "Horeca"]
+  }
+  
+  preds = tibble(
+    truth = test$Channel,
+    estimate = estimate,
+    Model = names(models_list)[i]
+    )
+  data_pred = bind_rows(data_pred, preds)
+}
+
+# ROC Curves
+roc_curve = data_pred %>%
+  group_by(Model) %>%
+  roc_curve(truth, estimate,
+            event_level = "first") %>%
+  autoplot() +
+  labs(title = "ROC Curves") +
+  scale_color_manual(values = c("skyblue", "dodgerblue", "navy"))
+
+# PR Curves
+pr_curve = data_pred %>%
+  group_by(Model) %>%
+  pr_curve(truth, estimate,
+           event_level = "first") %>%
+  autoplot() +
+  labs(title = "PR Curves")  +
+  geom_hline(yintercept = mean(train$Channel == "Horeca"),
+             linetype = "dashed") +
+  scale_color_manual(values = c("skyblue", "dodgerblue3", "navy")) + 
+  theme(legend.position = "none")
+
+roc_curve + pr_curve + plot_layout(guides = "collect")
+```
+
+The ROC curves for all three models are quite similar, suggesting comparable overall classification performance. However, the random forest model appears to have a slight edge, as its curve maintains a larger area under the curve near top-left corner of the plot. A similar trend is observed in the PR curves, where all three models perform similarly overall. However, logistic regression shows a noticeable dip below the horizontal dashed line (representing random guessing) at lower recall thresholds, indicating performance worse than random guessing in that region. KNN exhibits the most consistent curve with no sharp drops, while the random forest curve follows closely behind. These visualizations provide further insight into the PR-AUC and ROC-AUC values presented in Table 5.
+
+Overall, the random forest is the clear winner, achieving the highest ROC-AUC (0.955 test / 0.970 CV), accuracy (0.924 test / 0.925 CV), recall (0.963 test / 0.926 CV), and F1-scores (0.940 test / 0.945 CV). The combined high cross-validation and test metrics demonstrate the random forest's stability. In contrast, the KNN model exhibits overfitting, with a very low cross-validation PR-AUC of 0.464, which is far below its test performance of 0.963. Though logistic regression offers interpretability, the random forest's performance metrics and resistance to overfitting solidify it as the optimal choice for channel classification.
+
+## Regression
+
+The initial model served to establish a benchmark for evaluating the performance of the other regression models. The baseline model was the mean annual grocery spending of the training set, which resulted in an RMSE of 11,522 on the test data and a cross-validation RMSE of 7,945. The primary objective of the subsequent regression models is to significantly reduce the RMSE.
+
+Given the strong correlation between \texttt{Detergents \& Paper} and \texttt{Grocery} spending ($\rho = 0.80$), a linear model using \texttt{Detergents \& Paper} as the sole predictor was developed. This model significantly outperformed the baseline, achieving a test RMSE of 3,980 and a cross-validation RMSE of 3,500.
+
+To further refine predictions, \texttt{Milk}, which was the second-most correlated feature ($\rho = 0.77$), was added to the model. While this reduced the CV RMSE to 3,019, the test RMSE increased to 4,144, revealing a performance gap ($\Delta$RMSE = 1,125) indicative of overfitting. This instability likely arises because \texttt{Milk} and \texttt{Detergents \& Paper} are highly correlated ($\rho =0.68$), causing the model to rely too heavily on noise in the training data. Consequently, the simpler model with \texttt{Detergents \& Paper} only generalized more reliably to unseen data.
+
+A model with all 7 features was then created. This model resulted in the lowest test RMSE yet of 3,944 and a cross-validation RMSE of 3093. Again there is a large difference in RMSE values here ($\Delta$RMSE = 851), which may indicate some overfitting. Adding all features into the model increases multi-collinearity, so this must be addressed. But, before that, it was decided to remove \texttt{Channel} and \texttt{Region} from the model, which resulted in a test RMSE of 3939 and a cross-validation RMSE of 3062, which are the lowest RMSE values yet.
+
+To explore relationships between features and \texttt{Grocery} spending, a pairs plot with Spearman correlations was generated. 
+
+```{r, message=FALSE, warning=FALSE, echo = FALSE, fig.pos = "H", out.extra="", fig.cap="Pairs plot of Continuous Features with Spearman Correlations"}
+data_pairs = data[,-c(1,2)]
+
+colnames(data_pairs)[colnames(data_pairs) == "Detergents_Paper"] = "D & P"
+
+colnames(data_pairs)[colnames(data_pairs) == "Delicatessen"] = "Deli"
+
+ggpairs(data_pairs[,], 
+        upper = list(continuous = wrap("cor", 
+                                       method = "spearman", 
+                                       size = 4, 
+                                       color = "black")),
+        lower = list(continuous = wrap("points", 
+                                       shape = 21,
+                                       color = "black",
+                                       fill = "dodgerblue3")),
+        diag = list(continuous = wrap("densityDiag",
+                                      fill = "navy"))) + 
+  theme(axis.text.x = element_blank(), 
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "Pairs Plot of Continuous Features")
+```
+
+The plot reveals potential non-linear patterns between \texttt{Grocery} and the features \texttt{Frozen}, \texttt{Delicatessen}, and \texttt{Fresh}, suggesting that polynomial terms could better capture these trends.
+
+The plot also shows a strong correlation between \texttt{Milk} and \texttt{Detergents \& Paper} ($\rho = 0.68$) and moderate correlations between \texttt{Frozen} and \texttt{Fresh} ($\rho = 0.38$) and \texttt{Milk} and \texttt{Delicatessen} ($\rho = 0.37$). These strong to moderate correlations suggest that adding interaction terms for these feature pairs may improve model performance by accounting for joint effects.
+
+Following the pairs plot analysis, polynomial terms were introduced to address non-linear relationships: a degree 2 polynomial for \texttt{Frozen} and \texttt{Delicatessen}, and a degree 3 polynomial for \texttt{Fresh}. Interaction terms for \texttt{Milk} and \texttt{Detergents \& Paper}, \texttt{Frozen} and \texttt{Fresh}, and \texttt{Milk} and \texttt{Delicatessen} were also included. Surprisingly, these additions significantly degraded performance, resulting in a test RMSE of 4,761 and cross-validation RMSE of 4,488.
+
+Removing the interaction terms improved results, reducing the test RMSE to 4,035 and CV RMSE to 3,540. While this outperformed the polynomial-interaction model, it still lagged behind the simpler continuous-feature model.
+
+Finally, excluding \texttt{Channel} and \texttt{Region} yielded the most stable model yet, with a test RMSE of 4,002 and CV RMSE of 3,975 ($\Delta$RMSE = 27). Despite this improvement in stability, overall performance remained sub-optimal compared to earlier models, highlighting the difficulty of balancing model complexity with generalization.
+
+To address multicollinearity, reduce overfitting, and enhance model generalization, regularized regression (ridge and lasso) was applied to all models with more than two features. The data was z-score scaled to standardize feature magnitudes, enabling direct comparison of coefficients across predictors.
+
+The first model examined was the most complex one, incorporating all features, interaction terms, and polynomial terms for \texttt{Frozen}, \texttt{Delicatessen}, and \texttt{Fresh}, which replaced their original linear terms. Both ridge and lasso regression were implemented. The ridge model resulted in a test RMSE of 5,353 and a cross-validation RMSE of 3,217, indicating severe overfitting with $\Delta$RMSE = 2,136. Coefficient plots (not shown) suggest that the combination of polynomial and interaction terms was the primary cause.
+
+The lasso model performed slightly better, yielding a test RMSE of 4,444 and a cross-validation RMSE of 3,132, though overfitting remained an issue ($\Delta$RMSE = 1,312). Given that interaction terms have consistently degraded performance across models, they should likely be removed.
+
+To further analyze the impact of regularization, cross-validation MSE vs. $\log(\lambda)$ curves were generated for both models (Figure 7 below).
+
+\vspace{-30pt} 
+
+```{r, message=FALSE, warning=FALSE, echo = FALSE, fig.height = 3.3, fig.pos = "H", out.extra="", fig.cap="CV MSE vs log($\\lambda$) for Ridge/Lasso models with poly (Frozen, Deli, Fresh) and interaction terms."}
+max_models = readRDS("regression_max_models.rds")
+
+par(mfrow = c(1, 2), mar = c(5, 4, 6, 1))  # Set up 1x2 grid layout and adjust margins
+
+plot(max_models$ridge_max$model, 
+     main = expression("Ridge Regression MSE vs log("*lambda*")"), 
+     cex.main = 1, 
+     cex.lab = 0.8, 
+     ylab = "Cross-Validation MSE")
+
+plot(max_models$lasso_max$model, 
+     main = expression("Lasso Regression MSE vs log("*lambda*")"),  
+     cex.main = 1,
+     cex.lab = 0.8,
+     ylab = "Cross-Validation MSE")
+
+par(mfrow = c(1, 1))  # Reset layout to default (1x1)
+```
+
+The first vertical dotted line in the plots indicates the lambda value that resulted in the lowest MSE. Ridge regression benefits slightly from coefficient shrinkage, achieving optimal performance at $\log(\lambda) = -1.557$, while lasso regression shows a greater improvement, with its optimal performance at $\log(\lambda) = -3.72$, as indicated by the first vertical dotted line in its respective plot. This comparison illustrates lasso's ability to leverage the bias-variance trade off by shrinking irrelevant features (reducing variance while increasing bias).
+
+Regularization was also applied to the continuous feature model. The ridge regression model produced a test RMSE of 4,115 and a cross-validation RMSE of 3,292, which represents a significant improvement over the most complex model. The lasso regression model further improved these results, yielding a test RMSE of 3,938 and a cross-validation RMSE of 3,061. This is the best model so far because it achieved the lowest RMSE values. To explore the relationship between MSE and $\lambda$,  cross-validation MSE vs. $\log(\lambda)$ curves were generated for both models (Figure 8 below).
+
+\vspace{-40pt} 
+
+```{r, message=FALSE, warning=FALSE, echo = FALSE, fig.height = 3.2, fig.pos = "H", out.extra="", fig.cap="CV MSE vs log($\\lambda$) for Continuous Feature Ridge/Lasso Models"}
+cont_models = readRDS("regression_cont_models.rds")
+
+par(mfrow = c(1, 2), mar = c(5, 4, 6, 1))  # Set up 1x2 grid layout and adjust margins
+
+plot(cont_models$ridge_cont$model, 
+     main = expression("Ridge Regression MSE vs log("*lambda*")"), 
+     cex.main = 1, 
+     cex.lab = 0.8, 
+     ylab = "Cross-Validation MSE")
+
+plot(cont_models$lasso_cont$model, 
+     main = expression("Lasso Regression MSE vs log("*lambda*")"),  
+     cex.main = 1,
+     cex.lab = 0.8,
+     ylab = "Cross-Validation MSE")
+
+par(mfrow = c(1, 1))  # Reset layout to default (1x1)
+```
+
+\vspace{-14pt} 
+
+The plots indicate that in ridge regression, the best $\lambda$ value was the lowest one tested, with optimal performance at $\log(\lambda) = -2.39$, as marked by the first vertical dotted line. This clearly demonstrates that any coefficient shrinkage worsened model performance. In contrast, lasso regression benefited from some shrinkage, achieving optimal performance at $\log(\lambda) = -3.91$. This again highlights lasso's capacity to leverage the bias-variance trade-off effectively.
+
+To explore which features affected model performance the most, coefficient path plots were generated (Figure 9 below.)
+
+\vspace{-35pt} 
+
+```{r, message=FALSE, warning=FALSE, echo = FALSE, fig.height = 2.8, fig.pos = "H", out.extra="", fig.cap="Coefficient Path Plots for Continuous Feature Ridge/Lasso Models"}
+
+cont_coefs = readRDS("regression_cont_coefs.rds")
+
+rename_glmnet_vars <- function(model) {
+  var_names <- rownames(model$beta)
+  var_names <- gsub("Detergents_Paper", "D & P", var_names)
+  var_names <- gsub("Delicassen", "Deli", var_names)
+  rownames(model$beta) <- var_names
+  return(model)
+}
+
+cont_coefs$ridge_coefs <- rename_glmnet_vars(cont_coefs$ridge_coefs)
+cont_coefs$lasso_coefs <- rename_glmnet_vars(cont_coefs$lasso_coefs)
+
+par(
+  mfrow = c(1, 2), 
+  mar = c(4, 4, 5.5, 0.5),  # Plot margins (bottom, left, top, right)
+  oma = c(0, 0, 0, 4.3)   # Outer margin (adds space on the RIGHT for legend)
+)
+
+plot(cont_coefs$ridge_coefs, 
+     xvar = "lambda", 
+     col = c("cyan", "skyblue", "blue", "navy", "black"), 
+     main = expression("Ridge Paths vs log("*lambda*")"),
+     cex.main = 1, 
+     cex.lab = 0.8,
+     xlab = expression("log("*lambda*")"),
+     lwd = 2)
+
+
+plot(cont_coefs$lasso_coefs, 
+     xvar = "lambda", 
+     col = c("cyan", "skyblue", "blue", "navy", "black"), 
+     main = expression("Lasso Paths vs log("*lambda*")"),
+     cex.main = 1, 
+     cex.lab = 0.8,
+     xlab = expression("log("*lambda*")"),
+     lwd = 2)
+
+legend(
+  x = grconvertX(1, from = "npc"),  # Right edge of the plotting region
+  y = grconvertY(1.1, from = "npc"),  # Center vertically (adjust this value)
+  legend = rownames(cont_coefs$ridge_coefs$beta),
+  col = c("cyan", "skyblue", "blue", "navy", "black"),
+  lty = 1,
+  xpd = NA,
+  cex = 0.7,
+  bty = "n",
+  lwd = 2,
+  title = "Feature"
+)
+
+par(mfrow = c(1, 1))  # Reset layout to default (1x1)
+```
+
+The coefficient path plots indicate that in ridge regression, the most important feature is \texttt{Detergents \& Paper}, followed closely by \texttt{Milk}. As $\lambda$ increases, all coefficients in the ridge regression model shrink quite rapidly, which may explain why increasing $\lambda$ resulted in a higher MSE. 
+
+Similarly, in the lasso regression model, \texttt{Detergents \& Paper} remains the most important feature, followed by \texttt{Milk}. However, the coefficient for \texttt{Detergents \& Paper} is significantly larger than that of \texttt{Milk}. As $\lambda$ increases, \texttt{Detergents \& Paper} barely shrinks, while \texttt{Milk} also remains relatively stable but shrinks slightly sooner. This reinforces the idea that the high correlation between \texttt{Grocery} and \texttt{Detergents \& Paper} is the key factor driving model performance.
+
+The last set of regularized regression models was created for the continuous feature model, incorporating polynomial terms for \texttt{Frozen}, \texttt{Delicatessen}, and \texttt{Fresh}, which replaced their original linear terms. The ridge regression model resulted in a test RMSE of 4,165 and a cross-validation RMSE of 3,330. The lasso regression model achieved a test RMSE of 3,956 and a cross-validation RMSE of 3,100. Both models performed worse than the previous continuous feature only model.
+
+Finally, after developing all the regression models, their performance can be compared. Table 6 below summarizes the test and cross-validation (CV) RMSE values for each model.
+
+```{=latex}
+\FloatBarrier
+```
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+models <- tribble(
+  ~Model, ~`Test RMSE`, ~`CV RMSE`,
+  "1. Base (Mean)", 11522, 7945,
+  "2. Detergents \\& Paper Only", 3980, 3500,
+  "3. Detergents \\& Paper + Milk", 4144, 3019,
+  "4. All Features", 3944, 3093,
+  "5. Continuous Features Only", 3939, 3062,
+  "6. Polynomial + Interactions", 4761, 4488,
+  "7. Polynomial (No Interactions)", 4035, 3540,
+  "8. Continuous + Polynomial Terms", 4002, 3975,
+  "9. Max Feature Ridge", 5353, 3217,
+  "10. Max Feature Lasso", 4444, 3132,
+  "11. Continuous Ridge", 4115, 3292,
+  "12. Continuous Lasso", 3938, 3061,
+  "13. Continuous Polynomial Ridge", 4165, 3330,
+  "14. Continuous Polynomial Lasso", 3956, 3100
+)
+
+models <- models %>% mutate(across(where(is.numeric), ~ formatC(.x, format = "f", big.mark = ",", digits = 0)))
+
+kbl(
+  models,
+  caption = "\\textbf{Model Performance Comparison}",
+  align = c("l", "r", "r"),
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE,
+  col.names = c("Model", "Test RMSE", "CV RMSE")
+) %>%
+kable_styling(latex_options = c("striped", "hold_position")) 
+```
+
+```{=latex}
+\FloatBarrier
+```
+
+The best-performing model was Model 12, the continuous feature lasso regression model, with a test RMSE of 3,938 and a cross-validation RMSE of 3,061. The most stable model was Model 8, the continuous feature model with polynomial terms replacing the linear terms for \texttt{Detergents \& Paper}, \texttt{Fresh}, and \texttt{Frozen}, showing a $\Delta$RMSE of 27. The worst-performing model was Model 1, the base mean model, with a test RMSE of 11,522 and a cross-validation RMSE of 7,945. The most overfit model (excluding the base) was Model 9, the ridge model with substituted polynomial and interaction terms, exhibiting a $\Delta$RMSE of 2,162.
+
+To interpret Model 12's predictions, Table 7 summarizes the z-score scaled model coefficients at the optimal $\lambda$ value ($\lambda = 0.0201$), selected via cross-validation.  
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+# Extract coefficients for Model 12 (Continuous Lasso)
+coefs = coef(cont_models$lasso_cont$model, s = "lambda.min") %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature") %>%
+  dplyr::rename("Coefficient" = "s1") %>%
+  filter(Coefficient != 0)  # Remove zeroed-out coefficients
+
+# Clean feature names
+coefs$Feature = gsub("Detergents_Paper", "Detergents \\\\& Paper", coefs$Feature)
+coefs$Feature = gsub("Delicassen", "Delicatessen", coefs$Feature)
+
+kbl(
+  coefs,
+  caption = "\\textbf{Lasso Regression Z-Score Scaled Coefficients for Model 12} ($\\lambda = 0.0201$)",
+  align = c("l", "r"),
+  digits = 3,
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE
+) %>%
+kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+Table 7 confirms that \texttt{Detergents \& Paper} has the strongest positive association with grocery spending ($\beta = 0.763$), followed by \texttt{Milk} ($\beta = 0.202$). Lasso regularization shrunk the coefficient for \texttt{Frozen} to 0, excluding it from the model, while assigning negligible weights to \texttt{Fresh} ($\beta = 0.035$) and \texttt{Delicatessen} ($\beta = 0.06$). This aligns with the earlier correlation analysis (Section 2.2), where \texttt{Detergents \& Paper} ($\rho = 0.80$) and \texttt{Milk} ($\rho = 0.77$) showed the strongest relationships with \texttt{Grocery}, validating the model's focus on the most predictive features.  
+
+Given these results, Model 12 is the optimal choice for predicting annual spending on groceries. This model delivers the best RMSE performance, full interpretability of the retained coefficients, a future-proof design that automatically suppresses irrelevant features if new ones are added, and built-in multicollinearity management, which is crucial for handling correlated features.
+
+# Conclusion
+
+This analysis addressed two questions for the wholesale distributor: (1) predicting annual grocery spending from other purchasing features, and (2) classifying customer channels (\texttt{Retail} vs. \texttt{Horeca}) based on spending behavior. Both objectives were answered through exploratory analysis and machine learning modelling.
+
+The random forest model outperformed logistic regression and KNN, the highest ROC-AUC (0.955 test / 0.970 CV), accuracy (0.924 test / 0.925 CV), recall (0.963 test / 0.926 CV), and F1-scores (0.940 test / 0.945 CV). Its ability to handle non-linear relationships and mitigate overfitting through ensemble learning made it the superior choice. Notably, \texttt{Detergents \& Paper} spending was the most influential predictor, highlighting that \texttt{Retail} customers purchase significantly more non-food essentials like cleaning supplies compared to \texttt{Horeca} customers. The results enable automated channel classification, which can facilitate targeted marketing and customer issue resolution through dedicated service representatives for each channel. 
+
+In predicting grocery spending, lasso regression on continuous features delivered the best performance with the lowest RMSE (3,938 test / 3,061 cross-validation), outperforming all other regression models. The strong correlation between \texttt{Grocery} and \texttt{Detergents \& Paper} ($\rho = 0.80$) drove model performance, with lasso regularization shrinking the coefficient for \texttt{Frozen} to zero and assigning negligible weights to \texttt{Fresh} ($\beta = 0.035$) and \texttt{Delicatessen} ($\beta = 0.06$). This model provides useful forecasts for inventory planning, reducing the risk of stockouts and overstocking.
+
+The skewed distributions and outliers necessitated non-parametric techniques, while regularization addressed overfitting, multicollinearity, and enabled feature selection in regression. Cross-validation proved critical, as interaction terms degraded performance in complex models. Interestingly, while Kruskal-Wallis tests found no regional differences in spending, logistic regression flagged \texttt{Region} as statistically significant ($p = 0.010$ and $p = 0.001$), suggesting subtle regional trends warrant further exploration.
+
+Improvements could focus on addressing outliers to reduce overfitting and analyzing grocery spending by channel (\texttt{Retail} vs. \texttt{Horeca}), as their purchasing patterns differ significantly, as revealed in Section 2.3. Though the Chi-squared test in Section 2.3 found no dependence between \texttt{Channel} and \texttt{Region}, the logistic regression model contradicted this result, suggesting that further investigation into the relationship between \texttt{Channel} and \texttt{Region} is warranted.
+
+By using the random forest and lasso regression models, the wholesaler can enhance inventory planning, automate customer segmentation, and make data-driven decisions to optimize operations.
+
+
+
+
+
+
