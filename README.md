@@ -24,6 +24,6 @@ The dataset is publicly available and originates from a wholesale distributor in
 - **Region**: Lisbon, Oporto, or Other
 - Annual spending in Fresh, Milk, Grocery, Frozen, Detergents & Paper, and Delicassen Categories
 
-## ⚖️ License  
+## License ⚖️
 This project is licensed under the MIT License – see the [LICENSE](https://opensource.org/licenses/MIT) file for details.
 
